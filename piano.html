@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manos Musicales - IA</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            text-align: center;
+            background-color: #1e1e24;
+            color: #ffffff;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 { margin-bottom: 5px; color: #4dadff; }
+        p { color: #aaaaaa; margin-bottom: 20px; }
+        
+        .container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            margin: 0 auto;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        
+        /* Voltear espejo la cámara para interacción intuitiva */
+        #webcam, #output_canvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 640px;
+            height: 480px;
+            transform: rotateY(180deg);
+        }
+        
+        #status {
+            margin-top: 15px;
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #00ffcc;
+            min-height: 35px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Piano Virtual con Inteligencia Artificial</h1>
+    <p>Levanta tus dedos frente a la cámara. Cada dedo levantado activará una nota musical diferente.</p>
+
+    <div class="container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="output_canvas"></canvas>
+    </div>
+
+    <div id="status">Cargando modelos de IA...</div>
+
+    <script>
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusElement = document.getElementById('status');
+
+        // Configuración del sintetizador de Audio (Web Audio API)
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        // Mapeo de frecuencias de notas musicales para 5 dedos
+        const notas = [
+            { nombre: "DO", frecuencia: 261.63 },  // Pulgar
+            { nombre: "RE", frecuencia: 293.66 },  // Índice
+            { nombre: "MI", frecuencia: 329.63 },  // Medio
+            { nombre: "FA", frecuencia: 349.23 },  // Anular
+            { nombre: "SOL", frecuencia: 392.00 }  // Meñique
+        ];
+
+        // Objeto para rastrear qué notas están sonando activamente
+        let osciladoresActivos = {};
+
+        // Función para reproducir un tono matemático continuo
+        function iniciarNota(dedoIndex) {
+            if (!osciladoresActivos[dedoIndex]) {
+                if (audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+                
+                const osc = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                
+                osc.type = 'sine'; // Tipo de onda (suave)
+                osc.frequency.value = notas[dedoIndex].frecuencia;
+                
+                // Reducir volumen general para evitar distorsiones
+                gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime); 
+                
+                osc.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                osc.start();
+                
+                osciladoresActivos[dedoIndex] = { osc, gainNode };
+            }
+        }
+
+        // Función para detener el tono de un dedo específico
+        function detenerNota(dedoIndex) {
+            if (osciladoresActivos[dedoIndex]) {
+                osciladoresActivos[dedoIndex].osc.stop();
+                osciladoresActivos[dedoIndex].osc.disconnect();
+                delete osciladoresActivos[dedoIndex];
+            }
+        }
+
+        // Procesar los resultados devueltos por la IA de MediaPipe
+        function onResults(results) {
+            // Asegurar que el lienzo coincida con el tamaño dinámico de captura
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            let dedosLevantados = [false, false, false, false, false];
+            let notasJugando = [];
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                statusElement.innerText = "Mano detectada";
+                
+                const landmarks = results.multiHandLandmarks[0];
+
+                // --- ALGORITMO DE DETECCIÓN DE DEDOS LEVANTADOS ---
+                // Para los 4 dedos largos: si la punta (tip) está más arriba en el eje Y que la articulación intermedia (pip)
+                dedosLevantados[1] = landmarks[8].y < landmarks[6].y;   // Índice
+                dedosLevantados[2] = landmarks[12].y < landmarks[10].y; // Medio
+                dedosLevantados[3] = landmarks[16].y < landmarks[14].y; // Anular
+                dedosLevantados[4] = landmarks[20].y < landmarks[18].y; // Meñique
+
+                // Para el Pulgar: Se evalúa de manera horizontal (eje X) respecto al nodo base de la mano
+                dedosLevantados[0] = Math.abs(landmarks[4].x - landmarks[17].x) > Math.abs(landmarks[2].x - landmarks[17].x);
+
+                // Dibujar puntos visuales en el canvas sobre las puntas de los dedos activos
+                const puntasCodigos = [4, 8, 12, 16, 20];
+                for (let i = 0; i < 5; i++) {
+                    const pt = landmarks[puntasCodigos[i]];
+                    
+                    if (dedosLevantados[i]) {
+                        iniciarNota(i);
+                        notasJugando.push(notas[i].nombre);
+
+                        // Dibujar círculo verde brillante si el dedo está arriba emitiendo sonido
+                        canvasCtx.beginPath();
+                        canvasCtx.arc(pt.x * canvasElement.width, pt.y * canvasElement.height, 15, 0, 2 * Math.PI);
+                        canvasCtx.fillStyle = '#00ffcc';
+                        canvasCtx.fill();
+                    } else {
+                        detenerNota(i);
+                    }
+                }
+
+                statusElement.innerText = notasJugando.length > 0 ? "Sonando: " + notasJugando.join(" - ") : "Levanta los dedos...";
+            } else {
+                statusElement.innerText = "Coloca tu mano frente a la cámara";
+                // Si la mano sale del cuadro, apagar de inmediato todos los sonidos activos
+                for (let i = 0; i < 5; i++) { detenerNota(i); }
+            }
+        }
+
+        // Inicialización y configuración de MediaPipe Hands
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+        
+        hands.onResults(onResults);
+
+        // Control de la cámara de video nativa del equipo
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({ image: videoElement });
+            },
+            width: 640,
+            height: 480
+        });
+        
+        camera.start();
+    </script>
+</body>
+</html>
